@@ -47,9 +47,9 @@ class WaveformNoiseFilter(H5FlowStage):
         Uses the same dtype as the input waveform dataset except with ``'samples'`` converted to floats.
 
     '''
-    class_version = '1.0.0'
+    class_version = '1.0.1'
 
-    default_filter_samples = (0, 80)
+    default_filter_samples = (0, 50)
     default_modulo_param = 10
     default_keep_noise = False
     default_noise_dset_name = 'light/fwvfm_noise'

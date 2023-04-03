@@ -69,7 +69,7 @@ class WaveformDeconvolution(H5FlowStage):
                     noise_slice: [-256, null] # last 256 samples
 
     '''
-    class_version = '0.0.1'
+    class_version = '0.0.2'
 
     default_noise_spectrum_filename = 'wvfm_deconv_noise_power.npz'
     default_signal_spectrum_filename = 'wvfm_deconv_signal_power.npz'
@@ -252,7 +252,7 @@ class WaveformDeconvolution(H5FlowStage):
                     fft_bins = fft.shape[-1]
                     exp_fft_bins = self.noise_spectrum['spectrum'].shape[-1]
 
-                    spline = scipy.interpolate.CubicSpline(np.linspace(0, exp_fft_bins, fft_bins), spectrum/fft_bins, axis=-1)
+                    spline = scipy.interpolate.make_interp_spline(np.linspace(0, exp_fft_bins, fft_bins), spectrum/fft_bins, axis=-1, k=1)
                     spectrum = spline(np.arange(exp_fft_bins)) * exp_fft_bins
                     spectrum[np.isnan(spectrum)] = 0
 
