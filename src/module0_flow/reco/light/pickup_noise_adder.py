@@ -8,9 +8,9 @@ from h5flow import resources
 
 class PickupNoiseAdder(H5FlowStage):
     '''
-        Applies a signal on each light detector channel (``j``) with designated shape and a random amplitude.::
+        Applies a signal on each sample (``i``) for a light detector channel (``j``) with designated shape and a random amplitude.::
 
-            waveform_new[i] = random.normal[i] * scale[j] + mean[j]) * template[j][i + random.uniform[j] * len(waveform)] + waveform[i]
+            waveform_new[i] = (random.normal[j] * std[j] + mean[j]) * template[j][i + random.uniform[j] * len(waveform)] + waveform[i]
 
         Parameters:
          - ``in_dset_name`` : ``str``, required, input dataset path for waveforms
@@ -31,11 +31,11 @@ class PickupNoiseAdder(H5FlowStage):
                     out_dset_name: 'light/wvfm/w_noise'
                     in_dset_name: 'light/wvfm'
                     noise_mean:
-                      - []
-                      - []
+                      - [<ch0 mean>, <ch1 mean>, ...] # ADC 0
+                      - [<ch0 mean>, <ch1 mean>, ...] # ADC 1
                     noise_std:
-                      - []
-                      - []
+                      - [<ch0 std>, <ch1 std>, ...] # ADC 0
+                      - [<ch0 std>, <ch1 std>, ...] # ADC 1
                     template_file: 'data/module0_flow/noise_template_10MHz.npy'
 
         Uses the same dtype as the input waveform dataset except with ``'samples'`` converted to floats.
@@ -43,7 +43,7 @@ class PickupNoiseAdder(H5FlowStage):
         Template file should be a numpy .npy file containing an array of shape: ``(nadc, nchan, nsamples)``
 
     '''
-    class_version = '0.0.0'
+    class_version = '0.0.1'
 
     def __init__(self, **params):
         super(PickupNoiseAdder, self).__init__(**params)
@@ -124,7 +124,7 @@ class PickupNoiseAdder(H5FlowStage):
 
         # reserve new data
         out_slice = self.data_manager.reserve_data(self.out_dset_name, source_slice)
-        self.data_manager.write_data(self.out_dset_name, source_slice, out_wvfm.ravel())
+        self.data_manager.write_data(self.out_dset_name, out_slice, out_wvfm.ravel())
 
         # save references
         ref = np.c_[source_slice, out_slice]
