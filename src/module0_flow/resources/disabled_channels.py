@@ -86,9 +86,12 @@ class DisabledChannels(H5FlowResource):
             self._disabled_xy = np.c_[self.data_manager[self.path+'/xy/data']['x'], self.data_manager[self.path+'/xy/data']['y']]
 
         if self.rank == 0:
-            logging.info(f'N disabled channels: {len(self.disabled_xy)}')
-            logging.info(f'Disabled channel LUT size: '
-                         f'{self.disabled_channel_lut.nbytes/1024/1024:0.02f}MB')
+            print(f'DisabledChannels ({self.path}):')
+            print(f'\tDisabled channels list: {self.data["disabled_channels_list"]}')
+            print(f'\tMissing ASIC list: {self.data["missing_asic_list"]}')            
+            print(f'\tN disabled channels: {len(self.disabled_xy)}')
+            print(f'\tDisabled channel LUT size: '
+                  f'{self.disabled_channel_lut.nbytes/1024/1024:0.02f}MB')
 
         self._pixel_pitch = resources['Geometry'].pixel_pitch
         self._pixel_x_hi_edge = np.sort(np.unique(resources['Geometry'].pixel_xy.compress((0,)))) + self._pixel_pitch/2

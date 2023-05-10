@@ -121,7 +121,12 @@ class Geometry(H5FlowResource):
                     + self.tpc_id.nbytes + self.det_id.nbytes
                     + self.det_bounds.nbytes)
         if self.rank == 0:
-            logging.info(f'Geometry LUT(s) size: {lut_size/1024/1024:0.02f}MB')
+            print(f'Geometry ({self.path}):')
+            print(f'\tCRS: {self.crs_geometry_file}')
+            if self.network_agnostic:
+                print('\t*** Network agnostic enabled! ***')            
+            print(f'\tLRS: {self.lrs_geometry_file}')
+            print(f'\tGeometry LUT(s) size: {lut_size/1024/1024:0.02f}MB')
 
 
     def _create_regions(self):

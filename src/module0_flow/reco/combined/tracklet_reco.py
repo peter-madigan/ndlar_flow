@@ -358,6 +358,7 @@ class TrackletReconstruction(H5FlowStage):
 
         traj = np.empty((npts, 3))  # (M, 3)
         traj_s = np.empty((npts, 1))  # (M, 1)
+        traj_mask = np.zeros_like(traj_s, dtype=bool) # (M, 1)
 
         start_pt = np.argmin(s, axis=0)
         end_pt = np.argmax(s, axis=0)
@@ -366,10 +367,12 @@ class TrackletReconstruction(H5FlowStage):
         traj[1:] = TrackletReconstruction.local_mean(xyz, xyz[end_pt], dx, weights=weights)
         traj_s[0] = s[start_pt]
         traj_s[1:] = s[end_pt]
+        traj_mask[0] = True
+        traj_mask[-1] = True
 
         for i in range(1, npts - 1):
             # calculate residuals
-            d = TrackletReconstruction.trajectory_residual(xyz, traj, mode)  # (M, N)
+            d = TrackletReconstruction.trajectory_residual(xyz, traj[traj_mask.ravel()], mode)  # (M', N)
 
             # use smallest residual per point
             i_res_min = np.expand_dims(np.argmin(d, axis=0), axis=0)  # (1, N)
@@ -389,10 +392,12 @@ class TrackletReconstruction(H5FlowStage):
             new_s = np.sum((new_pt - centroid) * axis, axis=-1)  # (1,)
             traj[i] = new_pt
             traj_s[i] = new_s
+            traj_mask[i] = True
 
             order = np.argsort(traj_s, axis=0)  # (M, 1)
             traj[:] = np.take_along_axis(traj, order, axis=0)
             traj_s[:] = np.take_along_axis(traj_s, order, axis=0)
+            traj_mask[:] = np.take_along_axis(traj_mask, order, axis=0)            
 
         return traj
 

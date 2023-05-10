@@ -3,10 +3,6 @@
 flow:
   source: events
   stages: [delayed_analysis]
-  #drop: [
-  #  'charge/hits', 'charge/packets', 'charge/packets_corr_ts',
-  #  'light/hits','light/swvfm','light/t_ns',
-  #  'combined/hit_drift']
 
 
 resources:
@@ -39,6 +35,8 @@ delayed_analysis:
       path: ['light/events', 'light/swvfm/alignment']
       
   params:
+    save_indiv: True
+    delayed_window: [300, 20000]
     noise_factor: 1
     noise:
       # For LED integral calibration, scale factor noise_factor = 1) [units: PE/tick]

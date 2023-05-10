@@ -42,7 +42,7 @@ def bkg_likelihood_score(cos_mu, d, pdf_sig, pdf_bkg,
 
 
 class BackgroundID(H5FlowStage):
-    class_version = '0.0.0'
+    class_version = '0.0.1'
 
     defaults = dict(
         hits_dset_name='charge/hits',
@@ -234,10 +234,11 @@ class BackgroundID(H5FlowStage):
         logging.info(f'total background hits (per batch): {hit_label["bkg_flag"].sum()}')
 
         # write to file
-        self.data_manager.reserve_data(self.bkg_label_dset_name, source_slice)
-        self.data_manager.write_data(self.bkg_label_dset_name, source_slice, bkg_label)
+        if not self.generate_likelihood_pdf:
+            self.data_manager.reserve_data(self.bkg_label_dset_name, source_slice)
+            self.data_manager.write_data(self.bkg_label_dset_name, source_slice, bkg_label)
 
-        hit_label_slice = self.data_manager.reserve_data(self.hit_label_dset_name, int(hit_mask.sum()))
-        self.data_manager.write_data(self.hit_label_dset_name, hit_label_slice, hit_label)
-        self.data_manager.write_ref(self.hit_label_dset_name, self.hits_dset_name,
-                                    np.c_[hit_label_slice, hits['id'].compressed()])
+            hit_label_slice = self.data_manager.reserve_data(self.hit_label_dset_name, int(hit_mask.sum()))
+            self.data_manager.write_data(self.hit_label_dset_name, hit_label_slice, hit_label)
+            self.data_manager.write_ref(self.hit_label_dset_name, self.hits_dset_name,
+                                        np.c_[hit_label_slice, hits['id'].compressed()])

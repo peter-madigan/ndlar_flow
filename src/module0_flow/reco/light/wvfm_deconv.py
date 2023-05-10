@@ -3,6 +3,7 @@ import numpy.ma as ma
 import logging
 import os
 import scipy.interpolate
+from collections import defaultdict
 
 from h5flow.core import H5FlowStage
 from h5flow import H5FLOW_MPI
@@ -69,7 +70,7 @@ class WaveformDeconvolution(H5FlowStage):
                     noise_slice: [-256, null] # last 256 samples
 
     '''
-    class_version = '0.0.2'
+    class_version = '0.1.0'
 
     default_noise_spectrum_filename = 'wvfm_deconv_noise_power.npz'
     default_signal_spectrum_filename = 'wvfm_deconv_signal_power.npz'
@@ -83,6 +84,7 @@ class WaveformDeconvolution(H5FlowStage):
 
     NOISE_PPS = 'pps'
     NOISE_SLICE = 'slice'
+    default_noise_amplitude = (-128, 128)
 
     def __init__(self, **params):
         super(WaveformDeconvolution, self).__init__(**params)
@@ -96,6 +98,11 @@ class WaveformDeconvolution(H5FlowStage):
             raise RuntimeError(f'Invalid noise estimation strategy: {self.noise_strategy}')
         self.noise_slice = slice(*params.get('noise_slice', (None, None)))
         self.signal_amplitude = params.get('signal_amplitude', (-np.inf, np.inf))
+        self.noise_amplitude_dict = params.get('noise_amplitude', dict())
+        self.noise_amplitude_arr = np.empty((0,)) # assigned during init stage
+        if 'default' in self.noise_amplitude_dict:
+            self.default_noise_amplitude = self.noise_amplitude_dict['default']
+            del self.noise_amplitude_dict['default']
 
         self.gen_noise_spectrum = params.get('gen_noise_spectrum', False)
         self.gen_signal_spectrum = params.get('gen_signal_spectrum', False)
@@ -134,6 +141,12 @@ class WaveformDeconvolution(H5FlowStage):
 
         wvfm_dset = self.data_manager.get_dset(self.wvfm_dset_name)
 
+        self.noise_amplitude_arr = np.zeros((2,) + wvfm_dset.dtype['samples'].shape[:-1])
+        self.noise_amplitude_arr[:,:,:] = np.array(self.default_noise_amplitude)[:,np.newaxis,np.newaxis]
+        for itpc in self.noise_amplitude_dict:
+            for ichan in self.noise_amplitude_dict[itpc]:
+                self.noise_amplitude_arr[:, itpc, ichan] = self.noise_amplitude_dict[itpc][ichan]
+
         if self.do_filtering:
             self.noise_spectrum = dict(np.load(self.noise_spectrum_filename))
             self.signal_spectrum = dict(np.load(self.signal_spectrum_filename))
@@ -143,13 +156,16 @@ class WaveformDeconvolution(H5FlowStage):
             fft_shape = (2 * wvfm_dset.dtype['samples'].shape[-1]) // 2 + 1
             for spectrum in (self.noise_spectrum, self.signal_spectrum):
                 s = spectrum['spectrum']
+                s[~np.isfinite(s)] = 0
                 s_shape = s.shape[-1]
                 if s_shape != fft_shape:
                     if self.rank == 0:
                         logging.warning(f'Input spectrum size mismatch (in: {s_shape}, needed: {fft_shape}). '
                                         'Interpolating assuming same sample rate...')
-                    spline = scipy.interpolate.CubicSpline(np.linspace(0, fft_shape, s_shape), s/s_shape, axis=-1)
-                    s = spline(np.arange(fft_shape)) * fft_shape
+                    fft_freq_in = np.fft.rfftfreq((s_shape - 1) * 2)
+                    fft_freq_out = np.fft.rfftfreq(2 * wvfm_dset.dtype['samples'].shape[-1])
+                    spline = scipy.interpolate.CubicSpline(np.log(fft_freq_in + 1e-100), np.log(s/s_shape + 1e-100), axis=-1)
+                    s = np.exp(spline(np.log(fft_freq_out + 1e-100))) * fft_shape
                     s[np.isnan(s)] = 0
                     spectrum['spectrum'] = s
 
@@ -239,6 +255,13 @@ class WaveformDeconvolution(H5FlowStage):
                 # use all events, but only a subset of waveform
                 mask = (~wvfms.mask).all(axis=-1).any(axis=-1)
                 mask = mask.reshape(mask.shape + (1, 1))
+                mask = mask & np.all((wvfms > self.noise_amplitude_arr[0:1, ..., np.newaxis]) & (wvfms < self.noise_amplitude_arr[1:, ..., np.newaxis]), axis=-1)[..., np.newaxis]
+
+                # also filter PPS events
+                #pps_mask = (wvfms[:, :, self.pps_channel, :] > self.pps_threshold).any(axis=-1) \
+                #    & (~wvfms.mask).all(axis=-1).any(axis=-1)
+                #pps_mask = pps_mask.reshape(pps_mask.shape + (1, 1))
+                #mask = mask & ~pps_mask
 
                 if np.any(mask):
                     fft = np.fft.rfft(wvfms[..., self.noise_slice], axis=-1)
@@ -251,9 +274,11 @@ class WaveformDeconvolution(H5FlowStage):
                     # interpolate back to "full" fft
                     fft_bins = fft.shape[-1]
                     exp_fft_bins = self.noise_spectrum['spectrum'].shape[-1]
+                    fftfreq_in = np.fft.rfftfreq(2 * (fft_bins - 1))
+                    fftfreq_out = np.fft.rfftfreq(2 * (exp_fft_bins - 1))
 
-                    spline = scipy.interpolate.make_interp_spline(np.linspace(0, exp_fft_bins, fft_bins), spectrum/fft_bins, axis=-1, k=1)
-                    spectrum = spline(np.arange(exp_fft_bins)) * exp_fft_bins
+                    spline = scipy.interpolate.make_interp_spline(np.log(fftfreq_in + 1e-100), np.log(spectrum / fft_bins + 1e-100), axis=-1, k=3)
+                    spectrum = np.exp(spline(np.log(fftfreq_out + 1e-100))) * exp_fft_bins
                     spectrum[np.isnan(spectrum)] = 0
 
                     old_n = self.noise_spectrum['n']
@@ -270,8 +295,8 @@ class WaveformDeconvolution(H5FlowStage):
 
             if np.any(pps_mask):
                 # only use wvfms within signal amplitude window
-                wvfm_mask = (wvfms > self.signal_amplitude[0]) & (wvfms < self.signal_amplitude[-1])
-                wvfm_mask = wvfm_mask.any(axis=-1, keepdims=True)
+                wvfm_mask = (wvfms > self.signal_amplitude[0]).any(axis=-1, keepdims=True)
+                wvfm_mask = wvfm_mask & (wvfms < self.signal_amplitude[-1]).all(axis=-1, keepdims=True)
 
                 signal_fft = np.fft.rfft(wvfms, axis=-1)
 
@@ -397,6 +422,8 @@ class WaveformDeconvolution(H5FlowStage):
                 # save to file
                 np.savez_compressed(self.noise_spectrum_filename, spectrum=total_spectrum, n=total_n)
 
+                print(f'Average of {total_n.sum()} waveforms in {self.noise_spectrum_filename}')
+
         if self.gen_signal_spectrum:
             # gather from all processes
             signal_spectra = self.comm.gather(self.signal_spectrum, root=0) if H5FLOW_MPI else [self.signal_spectrum]
@@ -408,6 +435,8 @@ class WaveformDeconvolution(H5FlowStage):
 
                 # save to file
                 np.savez_compressed(self.signal_spectrum_filename, spectrum=total_spectrum, n=total_n)
+
+                print(f'Average of {total_n.sum()} waveforms in {self.signal_spectrum_filename}')
 
         if self.gen_signal_impulse:
             # gather from all processes
@@ -422,3 +451,5 @@ class WaveformDeconvolution(H5FlowStage):
 
                 # save to file
                 np.savez_compressed(self.signal_impulse_filename, impulse=total_impulse, n=total_n)
+
+                print(f'Average of {total_n.sum()} waveforms in {self.signal_impulse_filename}')

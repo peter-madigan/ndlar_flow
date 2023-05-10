@@ -210,12 +210,12 @@ def muon_range_table(pytestconfig, tmp_path_factory):
                                       'PDG_muon_range_table_Ar.txt')))
 
 
-@ pytest.fixture
+@pytest.fixture
 def light_noise_file(pytestconfig, tmp_path_factory):
     return next(maybe_fetch_from_url(pytestconfig, tmp_path_factory,
                                      ('https://portal.nersc.gov/project/dune/'
                                       'data/Module0/merged/reco_data/'
-                                      'events_2021_04_10_04_21_27_CEST.fwvfm.noise_power.npz')))
+                                      'fwvfm_noise_power.npz')))
 
 
 @pytest.fixture
@@ -223,7 +223,7 @@ def light_signal_file(pytestconfig, tmp_path_factory):
     return next(maybe_fetch_from_url(pytestconfig, tmp_path_factory,
                                      ('https://portal.nersc.gov/project/dune/'
                                       'data/Module0/merged/reco_data/'
-                                      'wvfm_deconv_signal_power.npz')))
+                                      'wvfm_signal_power.npz')))
 
 
 @pytest.fixture

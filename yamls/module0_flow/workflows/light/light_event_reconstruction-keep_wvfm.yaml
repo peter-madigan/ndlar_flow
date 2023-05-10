@@ -3,7 +3,7 @@
 
 flow:
   source: 'light/events'
-  stages: [timestamp_corrector, wvfm_filt, wvfm_align_filt, wvfm_deconv, wvfm_align, wvfm_sum]#, hit_finder]
+  stages: [timestamp_corrector, pickup_noise_adder, wvfm_filt, wvfm_align_filt, wvfm_deconv, wvfm_align, wvfm_sum]#, hit_finder]
 
 
 resources:
@@ -14,6 +14,10 @@ resources:
 
 timestamp_corrector:
   !include yamls/module0_flow/reco/light/LightTimestampCorrector.yaml
+
+
+pickup_noise_adder:
+  !include yamls/module0_flow/reco/light/PickupNoiseAdder.yaml
 
 
 wvfm_filt:

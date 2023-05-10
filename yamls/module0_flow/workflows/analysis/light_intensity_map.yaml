@@ -29,11 +29,13 @@ light_map:
       path: ['charge/hits', 'combined/q_calib_el']
     - name: 'combined/hit_drift'
       path: ['charge/hits', 'combined/hit_drift']
+    - 'combined/t0'
+    - 'combined/tracklets'
   params:
     wvfm_dset_name: 'light/fwvfm'
     charge_dset_name: 'combined/q_calib_el'
-    q_file: light_intensity_q.data.lut.v5.npz
-    s_file: light_intensity_s.data.lut.v5.npz
+    q_file: light_intensity_q.sim.lut.v7.npz
+    s_file: light_intensity_s.sim.lut.v7.npz
     sum_files: True
-    charge_weighting: False
+    charge_weighting: True
     use_adc_channel_id: True

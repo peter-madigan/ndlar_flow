@@ -283,6 +283,7 @@ class SymmetricWindowRawEventBuilder(RawEventBuilder):
             if mc_assn is None:
                 mask = (packets['io_group'] == io_group) & (packets['packet_type'] == 0) \
                     & (packets['receipt_timestamp'].astype(int) - packets['timestamp'].astype(int) < 0)
+                logging.info(f'Found {mask.sum()}/{mask.size} packets with a receipt timestamp less than the packet timestamp')
                 rollover[mask] -= self.rollover_ticks
 
         ts = packets['timestamp'].astype('i8') + rollover

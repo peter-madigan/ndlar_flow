@@ -3,7 +3,7 @@
 
 flow:
   source: 'light/events'
-  stages: [timestamp_corrector, wvfm_filt, wvfm_deconv, wvfm_align, wvfm_sum] #sipm_hit_finder, wvfm_sum, hit_finder]
+  stages: [pickup_noise_adder, timestamp_corrector, wvfm_filt, wvfm_deconv, wvfm_align, wvfm_sum] #sipm_hit_finder, wvfm_sum, hit_finder]
 
   # remove waveforms from output file
   drop: ['light/wvfm', 'light/fwvfm', 'light/deconv']
@@ -13,6 +13,10 @@ resources:
   - !include yamls/module0_flow/resources/RunData.yaml
   - !include yamls/module0_flow/resources/Geometry.yaml
   - !include yamls/module0_flow/resources/LArData.yaml
+
+
+pickup_noise_adder:
+  !include yamls/module0_flow/reco/light/PickupNoiseAdder.yaml
 
 
 timestamp_corrector:

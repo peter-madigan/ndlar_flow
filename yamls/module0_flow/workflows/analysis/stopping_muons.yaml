@@ -2,7 +2,8 @@
 
 flow:
   source: events
-  stages: [truth_labels, dropout, noise_overlay, stopping_muon_sel, michel_id, bkg_id]
+  stages: [truth_labels, noise_overlay, stopping_muon_sel, michel_id, bkg_id]
+  #stages: [truth_labels, dropout, noise_overlay, stopping_muon_sel, michel_id, bkg_id]  
 
 
 resources:
@@ -50,14 +51,11 @@ dropout:
       path: ['charge/hits', 'combined/q_calib_el']
     - name: 'combined/hit_drift'
       path: ['charge/hits', 'combined/hit_drift']
-    - name: 'analysis/stopping_muons/hit_profile'
-      path: ['charge/hits', 'analysis/stopping_muons/hit_profile']
   params:
     mask:
       - 'charge/hits'
       - 'combined/q_calib_el'
       - 'combined/hit_drift'
-      - 'analysis/stopping_muons/hit_profile'
     p: 0.03
 
 

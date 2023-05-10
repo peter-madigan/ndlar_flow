@@ -47,14 +47,14 @@ class LArData(H5FlowResource):
                     path: 'lar_info'
 
     '''
-    class_version = '0.3.0'
+    class_version = '0.3.1'
 
     default_path = 'lar_info'
     default_electron_mobility_params = np.array([551.6, 7158.3, 4440.43, 4.29, 43.63, 0.2053])
-    default_electron_lifetime = 2.2e3  # us
+    default_electron_lifetime = 2.2e3 # us
     default_electron_lifetime_file = None
-    default_temp = 90 * units.K
-    default_mode = 1
+    default_temp = 87.17 * units.K
+    default_mode = 0
 
     electron_lifetime_data_dtype = np.dtype([
         ('unix_s', 'f8'),
@@ -94,11 +94,12 @@ class LArData(H5FlowResource):
             self._init_electron_lifetime()            
 
         if self.rank == 0:
-            logging.info(f'temp: {self.temp}')
-            logging.info(f'drift mode: {self.mode}')
-            logging.info(f'v_drift: {self.v_drift}')
-            logging.info(f'density: {self.density}')
-            logging.info(f'W(ionization): {self.ionization_w}')
+            print(f'LArData ({self.path}):')
+            print(f'\ttemp: {self.temp}')
+            print(f'\tdrift mode: {self.mode}')
+            print(f'\tv_drift: {self.v_drift}')
+            print(f'\tdensity: {self.density}')
+            print(f'\tW(ionization): {self.ionization_w}')
 
     def _init_electron_lifetime(self):
         if 'electron_lifetime_central_value' in self.data:

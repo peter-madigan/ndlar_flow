@@ -75,7 +75,7 @@ class RawEventGenerator(H5FlowGenerator):
             unix_ts     u8, unix timestamp of event [s since epoch]
 
     '''
-    class_version = '0.3.0'
+    class_version = '0.3.1'
 
     default_buffer_size = 38400
     default_nhit_cut = 100
@@ -329,6 +329,9 @@ class RawEventGenerator(H5FlowGenerator):
 
     def finish(self):
         super(RawEventGenerator, self).finish()
+        if H5FLOW_MPI:
+            self.comm.barrier()
+        self.input_fh.close()
 
     def next(self):
         '''
@@ -381,7 +384,7 @@ class RawEventGenerator(H5FlowGenerator):
             mc_assn = mc_assn[~ts_mask[1:]]
         packet_buffer['timestamp'] = packet_buffer['timestamp'].astype(int) % 0x80000000 # ignore 32nd bit from pacman triggers, since larpix timestamp is only 31 bits
         self.last_unix_ts = unix_ts[-1] if len(unix_ts) else self.last_unix_ts
-        
+
         if self.timestamp_bit_error_fix_enabled and len(packet_buffer) > 0 and not self.is_mc:
             # apply a fix for known bit errors in timestamp
             # find chip keys with known issues            
@@ -399,32 +402,37 @@ class RawEventGenerator(H5FlowGenerator):
 
             if np.any(error_mask):
                 # create a "local" view near these packets
-                local_buffer_ts_view = np.lib.stride_tricks.sliding_window_view(packet_buffer['timestamp'], self.timestamp_bit_error_window)
-                local_error_view = np.lib.stride_tricks.sliding_window_view(error_mask, self.timestamp_bit_error_window)
+                local_buffer_ts_view = np.lib.stride_tricks.sliding_window_view(packet_buffer['timestamp'], self.timestamp_bit_error_window * 2)
+                local_error_view = np.lib.stride_tricks.sliding_window_view(error_mask, self.timestamp_bit_error_window * 2)
                 local_error_bitmask = error_bitmask[error_mask]
                 # since the sliding window doesn't extend past the end of the array, any elements at the end of the buffer need to be handled separately
-                error_mask0 = error_mask[:-self.timestamp_bit_error_window+1]
-                error_mask1 = error_mask[-self.timestamp_bit_error_window+1:]
+                error_mask0 = error_mask[:self.timestamp_bit_error_window]
+                error_mask1 = error_mask[self.timestamp_bit_error_window:-self.timestamp_bit_error_window]
+                error_mask2 = error_mask[-self.timestamp_bit_error_window:]
+
                 # exclude known problematic chips from local view
-                local_buffer_ts_view0 = local_buffer_ts_view[error_mask0]
-                local_error_view0 = local_error_view[error_mask0]            
+                local_buffer_ts_view1 = local_buffer_ts_view[:-1][error_mask1]
+                local_error_view1 = local_error_view[:-1][error_mask1]
                 # for last elements, just use the same view repeated multiple times
-                local_buffer_ts_view1 = np.repeat(local_buffer_ts_view[-1:], np.sum(error_mask1), axis=0)
-                local_error_view1 = np.repeat(local_error_view[-1:], np.sum(error_mask1), axis=0)
+                local_buffer_ts_view0 = np.repeat(local_buffer_ts_view[0:1], np.sum(error_mask0), axis=0)
+                local_error_view0 = np.repeat(local_error_view[0:1], np.sum(error_mask0), axis=0)                
+                local_buffer_ts_view2 = np.repeat(local_buffer_ts_view[-1:], np.sum(error_mask2), axis=0)
+                local_error_view2 = np.repeat(local_error_view[-1:], np.sum(error_mask2), axis=0)
                 # mask out entries we don't want to use to determine timestamp bits
                 local_buffer_ts_view = ma.array(
-                    np.concatenate([local_buffer_ts_view0, local_buffer_ts_view1], axis=0),
-                    mask=~np.concatenate([local_error_view0, local_error_view1], axis=0))
+                    np.concatenate([local_buffer_ts_view0, local_buffer_ts_view1, local_buffer_ts_view2], axis=0),
+                    mask=np.concatenate([local_error_view0, local_error_view1, local_error_view2], axis=0))
 
                 # use the most common value for the impacted bits
-                local_timestamp = stats.mstats.mode(np.bitwise_and(local_buffer_ts_view, local_error_bitmask[:,np.newaxis]), axis=-1)[0]
-                local_timestamp = local_timestamp.astype(packet_buffer.dtype['timestamp'])
+                local_timestamp_bits = stats.mstats.mode(np.bitwise_and(local_buffer_ts_view, local_error_bitmask[:,np.newaxis]), axis=-1)[0]
+                local_timestamp_bits = local_timestamp_bits.astype(packet_buffer.dtype['timestamp']).ravel()
 
                 # use local timestamp bits to fix bits in known problematic chips
+                prev_timestamp = packet_buffer['timestamp'][error_mask].copy()
                 np.place(packet_buffer['timestamp'], error_mask, np.bitwise_or(
                     np.bitwise_and(packet_buffer['timestamp'][error_mask], np.invert(local_error_bitmask)),
-                    np.bitwise_and(local_timestamp, local_error_bitmask)))
-
+                    local_timestamp_bits))
+                
         if self.sync_noise_cut_enabled and not self.is_mc:
             # remove all packets that occur before the cut
             sync_noise_mask = (packet_buffer['timestamp'] > self.sync_noise_cut[0]) & (packet_buffer['timestamp'] < self.sync_noise_cut[1])

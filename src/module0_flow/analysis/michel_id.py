@@ -10,12 +10,12 @@ from h5flow.core import H5FlowStage, resources
 from module0_flow.util import units
 
 
-def load_likelihood_pdf(filename):
+def load_likelihood_pdf(filename, sigma=2):
     d = np.load(filename)
     pdf = dict()
     for key in d.keys():
         pdf[key] = d[key]
-        pdf[key] = ndimage.gaussian_filter(pdf[key], sigma=0.5)
+        pdf[key] = ndimage.gaussian_filter(pdf[key], sigma=sigma, mode='nearest')
     pdf['sig'] /= pdf['sig'].sum()
     pdf['bkg'] /= pdf['bkg'].sum()
     return pdf
@@ -54,7 +54,7 @@ def michel_likelihood_score(cos_mu, cos_e, d, pdf_sig, pdf_bkg,
 
 
 class MichelID(H5FlowStage):
-    class_version = '0.1.0'
+    class_version = '0.1.1'
 
     defaults = dict(
         hits_dset_name='charge/hits',
@@ -72,7 +72,8 @@ class MichelID(H5FlowStage):
 
         likelihood_pdf_filename='michel_pdf-{version}.npz',
         generate_likelihood_pdf=False,
-        update_likelihood=True
+        update_likelihood=True,
+        likelihood_cut=0,
         )
 
     michel_label_dtype = np.dtype([
@@ -247,16 +248,17 @@ class MichelID(H5FlowStage):
             if self.generate_likelihood_pdf and resources['RunData'].is_mc:
                 # FIXME: paths are hardcoded and loaded on each execution
                 event_truth = np.expand_dims(self.data_manager['analysis/muon_capture/truth_labels', source_slice], axis=-1)
-                hit_traj = self.data_manager[source_name, 'charge/hits',
+                hit_traj = self.data_manager[source_name, 'charge/hits', 'charge/raw_hits',
                                              'charge/packets', 'mc_truth/tracks',
                                              'mc_truth/trajectories', source_slice]
-                hit_frac = self.data_manager[source_name, 'charge/hits',
+                hit_frac = self.data_manager[source_name, 'charge/hits', 'charge/raw_hits',
                                              'charge/packets',
                                              'mc_truth/packet_fraction',
                                              source_slice]
                 hit_traj = np.take_along_axis(
                     hit_traj, np.expand_dims(np.argmax(hit_frac, axis=-1), axis=(-2,-1)),
                     axis=-2)
+                hit_traj = hit_traj[:,:,0] # just uses the truth information for the first hit in each merged hit
                 hit_traj = hit_traj.reshape(hits.shape)
                 hit_label_truth = (
                     (hit_traj['trackID'] != event_truth['stopping_track_id'])
@@ -276,18 +278,18 @@ class MichelID(H5FlowStage):
 
             # use michel tag to reconstruct energy
             hit_e = hit_q * resources['LArData'].ionization_w * self.recomb_factor * self.larpix_gain
-            michel_tagged_e = (((hit_score > 0) & ~muon_flag) * hit_e).sum(axis=-1)
+            michel_tagged_e = (((hit_score > self.likelihood_cut) & ~muon_flag) * hit_e).sum(axis=-1)
             michel_e = (hit_e * ~muon_flag).sum(axis=-1)
 
             # cut on variables
-            michel_flag = ((np.sum((hit_score > 0) & ~muon_flag, axis=-1) > self.michel_nhit_cut)
+            michel_flag = ((np.sum((hit_score > self.likelihood_cut) & ~muon_flag, axis=-1) > self.michel_nhit_cut)
                            & (michel_tagged_e > self.michel_e_cut))
 
         # create output arrays
         michel_label = np.empty(ev.shape, dtype=self.michel_label_dtype)
         if len(ev):
             michel_label['michel_flag'] = michel_flag
-            michel_label['michel_nhit'] = np.sum((hit_score > 0) & ~muon_flag, axis=-1)
+            michel_label['michel_nhit'] = np.sum((hit_score > self.likelihood_cut) & ~muon_flag, axis=-1)
             michel_label['michel_e'] = michel_e
             michel_label['michel_tagged_e'] = michel_tagged_e
             michel_label['michel_dir'] = michel_dir
@@ -305,10 +307,11 @@ class MichelID(H5FlowStage):
         logging.info(f'total Michel hits (per batch): {hit_label["michel_flag"].sum()}')
 
         # write to file
-        self.data_manager.reserve_data(self.michel_label_dset_name, source_slice)
-        self.data_manager.write_data(self.michel_label_dset_name, source_slice, michel_label)
+        if not self.generate_likelihood_pdf:
+            self.data_manager.reserve_data(self.michel_label_dset_name, source_slice)
+            self.data_manager.write_data(self.michel_label_dset_name, source_slice, michel_label)
 
-        hit_label_slice = self.data_manager.reserve_data(self.hit_label_dset_name, int(hit_mask.sum()))
-        self.data_manager.write_data(self.hit_label_dset_name, hit_label_slice, hit_label)
-        self.data_manager.write_ref(self.hit_label_dset_name, self.hits_dset_name,
-                                    np.c_[hit_label_slice, hits['id'].compressed()])
+            hit_label_slice = self.data_manager.reserve_data(self.hit_label_dset_name, int(hit_mask.sum()))
+            self.data_manager.write_data(self.hit_label_dset_name, hit_label_slice, hit_label)
+            self.data_manager.write_ref(self.hit_label_dset_name, self.hits_dset_name,
+                                        np.c_[hit_label_slice, hits['id'].compressed()])

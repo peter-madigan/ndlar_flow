@@ -93,8 +93,9 @@ class RunData(H5FlowResource):
             assert_compat_version(self.class_version, self.data['class_version'])
 
         if self.rank == 0:
+            print(f'RunData ({self.path}):')
             for attr in self.required_attr:
-                logging.info(f'{attr}: {getattr(self,attr)}')
+                print(f'\t{attr}: {getattr(self,attr)}')
 
     def _lookup_filename(self):
         input_filename = ''

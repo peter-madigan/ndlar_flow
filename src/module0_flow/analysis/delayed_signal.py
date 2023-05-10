@@ -58,7 +58,7 @@ def loss(x, *args):
 
 
 class DelayedSignal(H5FlowStage):
-    class_version = '0.2.0'
+    class_version = '0.3.0'
 
     defaults = dict(
         hits_dset_name='charge/hits',
@@ -78,7 +78,7 @@ class DelayedSignal(H5FlowStage):
             mc={256: 'data/module0_flow/mod0_response.sim.256.npz',
                 1024: 'data/module0_flow/mod0_response.sim.1024.npz'}
         ),
-        response_model_terms=3,
+        response_model_terms=5,
         singlet_fraction=0.3,
         triplet_time=750, # ns
         noise_factor=1,
@@ -88,7 +88,9 @@ class DelayedSignal(H5FlowStage):
         edge_effect_window=3, # samples
         acceptance_threshold=1e-3,
         noise=None,
-        model_fit=False
+        model_fit=False,
+        save_indiv=False,
+        debug=os.environ.get('DELAYED_SIGNAL_DEBUG', False)
         )
 
     @staticmethod
@@ -97,7 +99,11 @@ class DelayedSignal(H5FlowStage):
         dtype_spec = [
             ('valid', 'u1'),
             ('prompt_acc', 'f4', (ntpc,ndet)),
-            ('delayed_acc', 'f4', (ntpc,ndet)),            
+            ('delayed_acc', 'f4', (ntpc,ndet)),
+            ('prompt_ampl', 'f4', (ntpc,ndet)),
+            ('delayed_ampl', 'f4', (ntpc,ndet)),
+            ('prompt_sum', 'f4', (ntpc,ndet)),
+            ('delayed_sum', 'f4', (ntpc,ndet)),            
             ('prompt_f', 'f4'),
             ('prompt_ns', 'f8'),
             ('pe_vis', 'f4'),
@@ -118,6 +124,9 @@ class DelayedSignal(H5FlowStage):
             ('ampl', 'f4'),
             ('sum', 'f4'),
             ('sig', 'f4'),
+            ('res_ampl', 'f4'),
+            ('res_sum', 'f4'),
+            ('res_sig', 'f4'),
             ('terms', 'f4', (nterms,ntpc,ndet))
         ])
 
@@ -227,7 +236,7 @@ class DelayedSignal(H5FlowStage):
             tpc,det = np.indices(wvfm.shape[-3:-1])
             acc = resources['Geometry'].solid_angle(xyz.reshape(-1,3), tpc.ravel(), det.ravel()).reshape(hits.shape + tpc.shape) / (4 * np.pi) # (ev, hits, 1, tpc, det)
             stop_pt_acc = resources['Geometry'].solid_angle(stop_pt, tpc.ravel(), det.ravel()).reshape(stop_pt.shape[:1] + tpc.shape) / (4 * np.pi)
-            acc *= hits['iogroup'][...,np.newaxis,np.newaxis]-1 == tpc[np.newaxis,np.newaxis,np.newaxis] # assert same tpc only FIXME
+            acc *= hits['iogroup'][...,np.newaxis,np.newaxis]-1 == tpc[np.newaxis,np.newaxis,np.newaxis] # assert same tpc only FIXME: only works for tpc mapping to io group - 1
             prompt_acc = ((acc * (hit_label['muon_flag'] * hits['q'])[...,np.newaxis,np.newaxis]).sum(axis=(1,2))
                           / (hit_label['muon_flag'] * hits['q']).sum(axis=(1,2),keepdims=True))
             delayed_acc = ((acc * (hit_label['michel_flag'] * hits['q'])[...,np.newaxis,np.newaxis]).sum(axis=(1,2))
@@ -245,6 +254,8 @@ class DelayedSignal(H5FlowStage):
                 valid_mask = wvfm_align[iev]['ns'] != 0
                 if ((np.max(wvfm_align[iev]['ns'][valid_mask]) - np.min(wvfm_align[iev]['ns'][valid_mask]) > 600)
                     and wvfm[iev].shape[-1] >= 1024 - 2 * self.edge_effect_window):
+                    if self.rank == 0:
+                        print(f'Event {iev} has a poor timing signature')
                     continue
 
                 # align waveforms to overlapping region only
@@ -262,51 +273,72 @@ class DelayedSignal(H5FlowStage):
 
                 # apply region selection on each waveform and create a new waveform, timestamp, and sample index for each
                 iclip = np.indices(wvfm[iev].shape[:-1] + (overlapping_samples,))[-1] + trig_start_clip[...,np.newaxis]
-                wvfm_clipped = np.take_along_axis(wvfm[iev], iclip, axis=-1)
-                wvfm_ns_clipped = np.take_along_axis(wvfm_ns[iev], iclip, axis=-1)
-                wvfm_clipped_align_sample = (first_trig_sample_idx - np.max(trig_start_clip)).astype(int)
+                wvfm_clipped_base = np.take_along_axis(wvfm[iev], iclip, axis=-1)
+                wvfm_ns_clipped_base = np.take_along_axis(wvfm_ns[iev], iclip, axis=-1)
+                wvfm_clipped_align_sample_base = (first_trig_sample_idx - np.max(trig_start_clip)).astype(int)
 
-                # fit prompt component from pca
-                template_align_sample = (self.template_align/32).astype(int) # FIXME: (...)/32 here because of averaging bug in script that generated templates
-                first_trig_sample_idx = np.maximum(wvfm_clipped_align_sample, template_align_sample[np.newaxis])
-                last_trig_sample_idx = np.minimum(wvfm_clipped_align_sample, template_align_sample[np.newaxis])
-                template_end_clip = min(self.template.shape[-1], wvfm_clipped.shape[-1]) - (first_trig_sample_idx - template_align_sample[np.newaxis])
-                template_start_clip = template_align_sample - last_trig_sample_idx
-                wvfm_end_clip = min(self.template.shape[-1], wvfm_clipped.shape[-1]) - (first_trig_sample_idx - wvfm_clipped_align_sample)
-                wvfm_start_clip = wvfm_clipped_align_sample - last_trig_sample_idx
-                overlapping_samples = int(np.min(template_end_clip - template_start_clip))
+                # loop over a few alignments to account for trigger jitter -5 -> +5 samples
+                max_offset = 5
+                curr_offset = -5
+                best_offset_found = False
+                best_offset = -5
+                best_offset_val = -1e9
+                while True:
+                    # fit prompt component from pca
+                    template_align_sample = curr_offset + (self.template_align/32).astype(int) # FIXME: (...)/32 here because of averaging bug in script that generated templates
+                    first_trig_sample_idx = np.maximum(wvfm_clipped_align_sample_base, template_align_sample[np.newaxis])
+                    last_trig_sample_idx = np.minimum(wvfm_clipped_align_sample_base, template_align_sample[np.newaxis])
+                    template_end_clip = min(self.template.shape[-1], wvfm_clipped_base.shape[-1]) - (first_trig_sample_idx - template_align_sample[np.newaxis])
+                    template_start_clip = template_align_sample - last_trig_sample_idx
+                    wvfm_end_clip = min(self.template.shape[-1], wvfm_clipped_base.shape[-1]) - (first_trig_sample_idx - wvfm_clipped_align_sample_base)
+                    wvfm_start_clip = wvfm_clipped_align_sample_base - last_trig_sample_idx
+                    overlapping_samples = int(np.min(template_end_clip - template_start_clip))
 
-                # sub-select overlapping portion following same approach as used to find overlapping regions of the waveforms
-                iclip_template = np.indices(
-                    wvfm.shape[1:2]
-                    + self.template.shape[1:-1]
-                    + (overlapping_samples,))[-1] + template_start_clip[...,np.newaxis] # (ntrig, ntpc, ndet, nsamples)
-                template_clipped = np.take_along_axis(self.template[:,np.newaxis], iclip_template[np.newaxis], axis=-1) # (ntemp, ntrig, ntpc, ndet, nsamples)
-                res_dev_clipped = np.take_along_axis(self.res_dev[np.newaxis], iclip_template, axis=-1) # (ntrig, ntpc, ndet, nsamples)
-                template_norm = np.sum(template_clipped**2, axis=-1).clip(1e-100,None)
-                template_clipped_align_sample = (template_align_sample[:,np.newaxis] - template_start_clip).astype(int)
-                iclip_wvfm = np.indices(wvfm_clipped.shape[:-1] + (overlapping_samples,))[-1] + wvfm_start_clip[...,np.newaxis]
-                wvfm_clipped = np.take_along_axis(wvfm_clipped, iclip_wvfm, axis=-1)
-                wvfm_ns_clipped = np.take_along_axis(wvfm_ns_clipped, iclip_wvfm, axis=-1)
-                wvfm_clipped_align_sample = (wvfm_clipped_align_sample - np.max(wvfm_start_clip)).astype(int)
+                    # sub-select overlapping portion following same approach as used to find overlapping regions of the waveforms
+                    iclip_template = np.indices(
+                        wvfm.shape[1:2]
+                        + self.template.shape[1:-1]
+                        + (overlapping_samples,))[-1] + template_start_clip[...,np.newaxis] # (ntrig, ntpc, ndet, nsamples)
+                    template_clipped = np.take_along_axis(self.template[:,np.newaxis], iclip_template[np.newaxis], axis=-1) # (ntemp, ntrig, ntpc, ndet, nsamples)
+                    res_dev_clipped = np.take_along_axis(self.res_dev[np.newaxis], iclip_template, axis=-1) # (ntrig, ntpc, ndet, nsamples)
+                    template_norm = np.sum(template_clipped**2, axis=-1).clip(1e-100,None)
+                    template_clipped_align_sample = (template_align_sample[:,np.newaxis] - template_start_clip).astype(int)
+                    iclip_wvfm = np.indices(wvfm_clipped_base.shape[:-1] + (overlapping_samples,))[-1] + wvfm_start_clip[...,np.newaxis]
+                    wvfm_clipped = np.take_along_axis(wvfm_clipped_base, iclip_wvfm, axis=-1)
+                    wvfm_ns_clipped = np.take_along_axis(wvfm_ns_clipped_base, iclip_wvfm, axis=-1)
+                    wvfm_clipped_align_sample = (wvfm_clipped_align_sample_base - np.max(wvfm_start_clip)).astype(int)
                 
-                # find prompt trigger
-                wvfm_align_ns = ma.array(
-                    wvfm_align[iev]['ns'],
-                    mask=wvfm_align[iev]['ns'] == 0)
-                ifirst_trigger = np.argmin(wvfm_align_ns, axis=-1)
-                first_trigger_ns = wvfm_align_ns[ifirst_trigger]
+                    # find prompt trigger
+                    wvfm_align_ns = ma.array(
+                        wvfm_align[iev]['ns'],
+                        mask=wvfm_align[iev]['ns'] == 0)
+                    ifirst_trigger = np.argmin(wvfm_align_ns, axis=-1)
+                    first_trigger_ns = wvfm_align_ns[ifirst_trigger]
 
-                # fit to prompt components
-                res = wvfm_clipped[ifirst_trigger].copy()
-                prompt_f = np.zeros(template_clipped.shape[0:1] + wvfm_clipped.shape[1:-1])
-                for ic in range(template_clipped.shape[0]):
-                    prompt_f[ic] = np.sum(res * template_clipped[ic,ifirst_trigger], axis=-1)
-                    prompt_f[ic] /= template_norm[ic,ifirst_trigger]
-                    res -= prompt_f[ic,...,np.newaxis] * template_clipped[ic,ifirst_trigger]
+                    # fit to prompt components
+                    res = wvfm_clipped[ifirst_trigger].copy()
+                    prompt_f = np.zeros(template_clipped.shape[0:1] + wvfm_clipped.shape[1:-1])
+                    for ic in range(template_clipped.shape[0]):
+                        prompt_f[ic] = np.sum(res * template_clipped[ic,ifirst_trigger], axis=-1)
+                        prompt_f[ic] /= template_norm[ic,ifirst_trigger]
+                        res -= prompt_f[ic,...,np.newaxis] * template_clipped[ic,ifirst_trigger]
 
-                prompt_signal = np.sum(prompt_f[:,...,np.newaxis] * template_clipped[:,ifirst_trigger], axis=0)
-                prompt_signal_ns = wvfm_ns_clipped[ifirst_trigger]
+                    prompt_signal_term = prompt_f[:,...,np.newaxis] * template_clipped[:,ifirst_trigger]
+                    prompt_signal = np.sum(prompt_signal_term, axis=0)
+                    prompt_signal_ns = wvfm_ns_clipped[ifirst_trigger]
+
+                    # (icomp, itrig, tpc, det)
+                    curr_offset_val = -np.log((res**2).sum()/res.shape[-1])
+                    if curr_offset_val >= best_offset_val:
+                        best_offset = curr_offset
+                        best_offset_val = curr_offset_val.copy()
+                    if best_offset_found == True:
+                        break
+                    if curr_offset == max_offset:
+                        best_offset_found = True
+                        curr_offset = best_offset
+                    else:
+                        curr_offset += 1
 
                 # calculate delayed significance
                 min_ns = np.min(wvfm_ns_clipped)
@@ -315,8 +347,13 @@ class DelayedSignal(H5FlowStage):
                 ydata = np.zeros_like(xdata)
                 ydata_prompt_sub = np.zeros_like(xdata)
                 ysig = np.zeros_like(xdata)
-                ysig_prompt_sub = np.zeros_like(xdata)                
+                ysig_prompt_sub = np.zeros_like(xdata)
                 mask = np.zeros_like(xdata, dtype=bool)
+                if self.save_indiv:
+                    ydata_indiv = np.zeros(wvfm.shape[-3:-1] + xdata.shape)
+                    ydata_prompt_sub_indiv = np.zeros(wvfm.shape[-3:-1] + xdata.shape)
+                    ysig_indiv = np.zeros(wvfm.shape[-3:-1] + xdata.shape)
+                    ysig_prompt_sub_indiv = np.zeros(wvfm.shape[-3:-1] + xdata.shape)
                 for itrig in range(wvfm.shape[1]):
                     if itrig == ifirst_trigger:
                         prompt_trigger = True
@@ -332,26 +369,88 @@ class DelayedSignal(H5FlowStage):
                                 yinterp = np.interp(xdata[subset], wvfm_ns_clipped[itrig,itpc,idet,:], wvfm_clipped[itrig,itpc,idet,:], left=0, right=0)
                                 yinterp_prompt_sub = np.interp(xdata[subset], wvfm_ns_clipped[itrig,itpc,idet,:], wvfm_clipped[itrig,itpc,idet,:] - prompt_signal[itpc,idet,:] * prompt_trigger, left=0, right=0)
                                 noise = res_dev_clipped[0,itpc,idet] * prompt_trigger + res_dev_clipped[0,itpc,idet].mean() * ~prompt_trigger
-                                #noise = res_dev_clipped[0,itpc,idet].mean()
                                 
                                 ydata[subset] += yinterp
                                 ydata_prompt_sub[subset] += yinterp_prompt_sub
                                 ysig[subset] += (np.sign(yinterp) * (yinterp**2) / noise**2)
-
                                 ysig_prompt_sub[subset] += (np.sign(yinterp_prompt_sub) * (yinterp_prompt_sub**2) / noise**2)
+
+                                if self.save_indiv:
+                                    ydata_indiv[itpc,idet,subset] += yinterp
+                                    ydata_prompt_sub_indiv[itpc,idet,subset] += yinterp_prompt_sub
+                                    ysig_indiv[itpc,idet,subset] += (np.sign(yinterp) * (yinterp**2) / noise**2)
+                                    ysig_prompt_sub_indiv[itpc,idet,subset] += (np.sign(yinterp_prompt_sub) * (yinterp_prompt_sub**2) / noise**2)
                                 
                 avg_samples = int(self.sig_avg_window/self.sample_rate)
-                #ydata_sliding_window = np.convolve(ysig, np.ones(avg_samples)/avg_samples, 'same')
                 ydata_sum = np.convolve(ydata, np.ones(avg_samples), 'same')[mask]
                 ydata_prompt_sub_sum = np.convolve(ydata_prompt_sub, np.ones(avg_samples), 'same')[mask]                
+
                 xdata = xdata[mask]
+
                 ydata = ydata[mask]
                 ydata_prompt_sub = ydata_prompt_sub[mask]
-                #ysig = ysig[mask]
+
                 ysig = np.convolve(ysig, np.ones(avg_samples)/avg_samples, 'same')[mask]
-                #ysig_prompt_sub = ysig_prompt_sub[mask]
                 ysig_prompt_sub = np.convolve(ysig_prompt_sub, np.ones(avg_samples)/avg_samples, 'same')[mask]
-                #ydata_sliding_window = ydata_sliding_window[mask]
+
+                if self.save_indiv:
+                    ydata_sum_indiv = np.zeros(wvfm.shape[-3:-1] + ydata_sum.shape)
+                    ydata_prompt_sub_sum_indiv = np.zeros(wvfm.shape[-3:-1] + ydata_sum.shape)                    
+                    for itpc in range(wvfm.shape[2]):
+                        for idet in range(wvfm.shape[3]):
+                            ydata_sum_indiv[itpc,idet] = np.convolve(ydata_indiv[itpc,idet], np.ones(avg_samples), 'same')[mask]
+                            ydata_prompt_sub_sum_indiv[itpc,idet] = np.convolve(ydata_prompt_sub_indiv[itpc,idet], np.ones(avg_samples), 'same')[mask]
+                            ysig_indiv[itpc,idet] = np.convolve(ysig_indiv[itpc,idet], np.ones(avg_samples), 'same')
+                    ydata_indiv = ydata_indiv[...,mask]
+                    ydata_prompt_sub_indiv = ydata_prompt_sub_indiv[...,mask]
+                    ysig_indiv = ysig_indiv[...,mask]
+
+                    if self.debug:
+                        # plot a 3-panel view of individual channel response
+                        import matplotlib.pyplot as plt
+                        fig, axes = plt.subplots(2,4,sharex='all',sharey='row', figsize=(16,5), dpi=100, gridspec_kw=dict(height_ratios=[2,1], width_ratios=[1,1,1,0.1]))
+
+                        # first plot is the overall signal
+                        scale = ydata_sum_indiv.max()
+                        cmap = 'RdBu_r'
+                        axes[0,0].imshow(
+                            ydata_sum_indiv.reshape(-1,ydata_sum_indiv.shape[-1]),
+                            vmax=scale,
+                            vmin=-scale,
+                            cmap=cmap,
+                            aspect='auto',
+                            interpolation='none',                            
+                            origin='lower')
+                        axes[1,0].plot(ydata_sum, color='k')
+                        axes[0,1].imshow(
+                            (ydata_sum_indiv - ydata_prompt_sub_sum_indiv).reshape(-1,ydata_sum_indiv.shape[-1]),
+                            vmax=scale,
+                            vmin=-scale,
+                            cmap=cmap,
+                            aspect='auto',
+                            interpolation='none',
+                            origin='lower')
+                        axes[1,1].plot(ydata_sum - ydata_prompt_sub_sum, color='k')
+                        img = axes[0,2].imshow(
+                            (ydata_prompt_sub_sum_indiv).reshape(-1,ydata_sum_indiv.shape[-1]),
+                            vmax=scale,
+                            vmin=-scale,
+                            cmap=cmap,
+                            aspect='auto',
+                            interpolation='none',
+                            origin='lower')
+                        axes[1,2].plot(ydata_prompt_sub_sum, color='k')
+                        for ax in axes[1,:]:
+                            ax.set_xlabel('sample index')
+                        axes[0,0].set_ylabel('detector index')
+                        axes[0,0].set_title('detector waveform')
+                        axes[1,0].set_ylabel('50ns integral [pe]')
+                        axes[0,1].set_title('prompt fit')
+                        axes[0,2].set_title('prompt residual')
+                        plt.colorbar(mappable=img, ax=axes[0,2], label='50ns integral [pe]')
+                        axes[0,3].axis('off')
+                        axes[1,3].axis('off')
+                        plt.tight_layout()                        
             
                 # guess prompt signal time and amplitude
                 # definition:
@@ -361,6 +460,8 @@ class DelayedSignal(H5FlowStage):
                 prompt_mask = ((xdata - first_trigger_ns >= self.prompt_window[0])
                                & (xdata - first_trigger_ns < self.prompt_window[1]))
                 if not np.any(prompt_mask):
+                    if self.rank == 0:
+                        print(f'Event {iev} has no signal within prompt window')
                     continue
                 else:
                     prompt_data[iev]['valid'] = True
@@ -368,11 +469,17 @@ class DelayedSignal(H5FlowStage):
                 prompt_sample = np.argmax(ysig[prompt_mask])
                 prompt_ns = xdata[prompt_mask][prompt_sample]
                 prompt_ampl = ydata[prompt_mask][prompt_sample]
-                prompt_sum = ydata_sum[prompt_mask][prompt_sample]                
+                prompt_sum = ydata_sum[prompt_mask][prompt_sample]
+                if self.save_indiv:
+                    prompt_ampl_indiv = ydata_indiv[..., prompt_mask][..., prompt_sample]
+                    prompt_sum_indiv = ydata_sum_indiv[..., prompt_mask][..., prompt_sample]
                 prompt_data[iev]['ns'] = prompt_ns
                 prompt_data[iev]['ampl'] = prompt_ampl
                 prompt_data[iev]['sum'] = prompt_sum                
                 prompt_data[iev]['sig'] = ysig[prompt_mask][prompt_sample]
+                prompt_data[iev]['res_ampl'] = ydata_prompt_sub[prompt_mask][prompt_sample]
+                prompt_data[iev]['res_sum'] = ydata_prompt_sub_sum[prompt_mask][prompt_sample]
+                prompt_data[iev]['res_sig'] = ysig_prompt_sub[prompt_mask][prompt_sample]
                 prompt_data[iev]['terms'] = prompt_f
                 #prompt_data[iev]['sig'] = ydata_sliding_window[prompt_mask][prompt_sample]
 
@@ -394,37 +501,24 @@ class DelayedSignal(H5FlowStage):
                 delayed_mask = ((xdata - prompt_ns >= self.delayed_window[0])
                                 & (xdata - prompt_ns < self.delayed_window[1]))
                 if not np.any(delayed_mask):
+                    if self.rank == 0:
+                        print(f'No samples in delayed window on event {iev}')
                     continue
                 else:
                     delayed_data[iev]['valid'] = True
 
-                '''
-                delayed_sig = np.zeros_like(ydata)[delayed_mask]
-                for itrig in range(wvfm.shape[1]):
-                    for itpc in range(wvfm.shape[2]):
-                        for idet in range(wvfm.shape[3]):
-                            if idet%4 == 0:
-                                continue
-                            if np.any(~wvfm[iev,itrig,itpc,idet,:].mask) or np.any(~wvfm_ns[iev,itrig,itpc,idet,:].mask):
-                                # prompt model assumes 100% of waveform energy contained in prompt signal
-                                subset = (xdata >= wvfm_ns[iev,itrig,itpc,idet,0]) & (xdata <= wvfm_ns[iev,itrig,itpc,idet,-1])
-                                yinterp = (np.interp(xdata[delayed_mask], wvfm_ns[iev,itrig,itpc,idet,:].compressed(), wvfm[iev,itrig,itpc,idet,:].compressed(), left=0, right=0)
-                                           - f_delayed(xdata[delayed_mask], pe_vis * prompt_acc[iev,itpc,idet]/prompt_acc_norm, prompt_ns, 0, 0))
-                                delayed_sig += np.sign(yinterp) * (yinterp)**2 / (self.noise[itpc,idet] * self.noise_factor if self.noise.ndim > 1 else self.noise*self.noise_factor)**2
-                delayed_sig = np.convolve(delayed_sig, np.ones(avg_samples)/avg_samples, 'same')
-                '''
                 delayed_sample = np.argmax(ysig_prompt_sub[delayed_mask])
-                #delayed_sample = np.argmax(delayed_sig)
                 delayed_ns = xdata[delayed_mask][delayed_sample]
                 delayed_ampl = ydata_prompt_sub[delayed_mask][delayed_sample]
                 delayed_sum = ydata_prompt_sub_sum[delayed_mask][delayed_sample]
-                #delayed_ampl = ydata[delayed_mask][delayed_sample]                
                 delayed_data[iev]['ns'] = delayed_ns
                 delayed_data[iev]['ampl'] = delayed_ampl
                 delayed_data[iev]['sum'] = delayed_sum                
                 delayed_data[iev]['delay'] = delayed_ns - prompt_ns
                 delayed_data[iev]['sig'] = ysig_prompt_sub[delayed_mask][delayed_sample]
-                #delayed_data[iev]['sig'] = delayed_sig[delayed_sample]                
+                if self.save_indiv:
+                    delayed_ampl_indiv = ydata_prompt_sub_indiv[..., delayed_mask][..., delayed_sample]
+                    delayed_sum_indiv = ydata_prompt_sub_sum_indiv[..., delayed_mask][..., delayed_sample]
 
                 t_offset_ns = xdata.min()
                 p0 = (prompt_ampl / (prompt_ampl + delayed_ampl), prompt_ns - t_offset_ns, delayed_ns - prompt_ns) + self.p0
@@ -470,16 +564,19 @@ class DelayedSignal(H5FlowStage):
                 fit_data[iev]['ndf'] = wvfm_ns[iev,trig,tpc,det,:].size - len(p)
                 fit_data[iev]['fraction'] = p[3]
                 fit_data[iev]['tau_t'] = p[4]
+                if self.save_indiv:
+                    fit_data[iev]['prompt_sum'] = prompt_sum_indiv
+                    fit_data[iev]['prompt_ampl'] = prompt_ampl_indiv
+                    fit_data[iev]['delayed_sum'] = delayed_sum_indiv
+                    fit_data[iev]['delayed_ampl'] = delayed_ampl_indiv
 
-                if False and 980 < delayed_data[iev]['delay'] < 1140 and delayed_data[iev]['sum'] > 300:
+                if False and prompt_acc[iev].sum() == 0:
                     import pdb; pdb.set_trace()
 
                 ## FOR DEBUG ONLY!
                 # plots each analyzed event
-                if False: #(not fit_result.success and resources['RunData'].is_mc):
-                    print('prompt', prompt_data[iev])
-                    print('delayed', delayed_data[iev])
-                    print('fit', fit_data[iev])
+                if self.debug:
+                    print('event', np.r_[source_slice][iev])
 
                     imax0,imax1 = ma.argsort((wvfm[iev] * delayed_acc[iev,...,np.newaxis] * (np.arange(wvfm.shape[-2]) % 4 != 0)[...,np.newaxis]).sum(axis=(0,-1)).ravel())[-2:].tolist()
                     import matplotlib.pyplot as plt
@@ -532,41 +629,27 @@ class DelayedSignal(H5FlowStage):
                             order = np.argsort(t)
                             t = t[order]
                             y = y[order]
+                            y_prompt = prompt_signal[itpc,idet,:]
+                            t_prompt = prompt_signal_ns[itpc,idet,:]
+                            y_res = res[itpc,idet,:]
 
+                            # zero supression
+                            #y *= (y > res_dev_clipped[0,itpc,idet].mean())
+                            #y_prompt *= (y_prompt > res_dev_clipped[0,itpc,idet].mean())
+                            #y_res *= (y_res > res_dev_clipped[0,itpc,idet].mean())
+                            
                             offset = idet//4
                             
-                            axes[itpc,idet%4].plot(t, y, '.', color=f'C{offset}', label='largest waveform')
-                            axes[itpc,idet%4].plot(t, pe_vis * f_delayed(t, *pinit), ':', color=f'C{offset}', label='fit initialization')
-                            axes[itpc,idet%4].plot(t, pe_vis * f_delayed(t, *pbest), color=f'C{offset}', label='fit (both)')
+                            axes[itpc,idet%4].plot(t, y + offset * 10, '-', color=f'C{offset}', label='largest waveform', lw=1)
+                            axes[itpc,idet%4].plot(t_prompt, y_prompt + offset * 10, '--', color=f'C{offset}', lw=1)
+                            axes[itpc,idet%4].plot(t_prompt, y_res + offset * 10, ':', color=f'C{offset}', lw=1)
+                            axes[itpc,idet%4].axhline(res_dev_clipped[0,itpc,idet].mean() + offset * 10, ls=':', color=f'C{offset}')
                             axes[itpc,idet%4].axvline(prompt_data[iev]['ns'], color=f'C{offset}', lw=1, ls=':')
                             axes[itpc,idet%4].axvline(delayed_data[iev]['ns'], color=f'C{offset}', lw=1, ls=':')
                             axes[itpc,idet%4].axvline(fit_data[iev]['prompt_ns'], color=f'C{offset}', lw=1, ls='-')
                             axes[itpc,idet%4].axvline(fit_data[iev]['prompt_ns']+fit_data[iev]['delayed_ns'], color=f'C{offset}', lw=1, ls='-')
                             axes[itpc,idet%4].axvline(first_trigger_ns + self.prompt_window[0], color='k', lw=1, ls='--', label='prompt window')
                             axes[itpc,idet%4].axvline(first_trigger_ns + self.prompt_window[1], color='k', lw=1, ls='--')
-
-                    fig,axes = plt.subplots(2, 4, num=4, dpi=100, figsize=(12,6), sharex='all')
-                    if 'mc_truth' in self.data_manager['/']:
-                        true_parent = self.data_manager['analysis/muon_capture/truth_labels/stopping_track','mc_truth/tracks', np.r_[source_slice][iev]]['t0'].ravel()[0]
-                        true_decay = self.data_manager['analysis/muon_capture/truth_labels/michel_track','mc_truth/tracks', np.r_[source_slice][iev]]['t0'].ravel()[0]
-                        if true_decay > 0:
-                            for ax in axes:
-                                for a in ax:
-                                    a.axvline((true_decay - true_parent)*1e3 + p[1] + t_offset_ns, color='k', ls=':', label='true decay', zorder=np.inf)
-                    for itpc in range(prompt_acc[iev].shape[0]):
-                        for idet in range(prompt_acc[iev].shape[1]):
-                            pinit = (p0[0] * prompt_acc[iev,itpc,idet]/prompt_acc_norm, p0[1] + t_offset_ns, (1-p0[0]) * delayed_acc[iev,itpc,idet]/delayed_acc_norm, p0[2], p0[3], p0[4])
-                            pbest = (p[0] * prompt_acc[iev,itpc,idet]/prompt_acc_norm, p[1] + t_offset_ns, (1-p[0]) * delayed_acc[iev,itpc,idet]/delayed_acc_norm, p[2], p[3], p[4])
-                            t = wvfm_ns[iev,:,itpc,idet,:].reshape(-1,wvfm_ns.shape[-1]).compressed()
-                            y = wvfm[iev,:,itpc,idet,:].reshape(-1,wvfm_ns.shape[-1]).compressed()
-                            order = np.argsort(t)
-                            t = t[order]
-                            y = y[order]
-
-                            offset = idet//4
-                            axes[itpc,idet%4].plot(t, np.cumsum(y), '.', color=f'C{offset}', label='largest waveform')
-                            axes[itpc,idet%4].plot(t, np.cumsum(pe_vis * f_delayed(t, *pinit)), ':', color=f'C{offset}', label='fit initialization')
-                            axes[itpc,idet%4].plot(t, np.cumsum(pe_vis * f_delayed(t, *pbest)), color=f'C{offset}', label='fit (both)')
 
                     plt.show(block=True)
 

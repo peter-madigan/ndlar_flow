@@ -26,7 +26,8 @@ class LightIntensityMapGenerator(H5FlowStage):
     use_adc_channel_id = False
 
     wvfm_dset_name = 'light/swvfm' # must have a samples field
-    tracks_dset_name = 'combined/tracks'
+    tracks_dset_name = 'combined/tracklets'
+    charge_dset_name = 'charge/hits'
 
     q_file = 'light_intensity_q.sim.lut.v2.npz'
     s_file = 'light_intensity_s.sim.lut.v2.npz'
